@@ -1026,6 +1026,16 @@ Examples: `./import-map.json',
   :type 'boolean
   :package-version '(lsp-mode . "8.0.0"))
 
+(defcustom lsp-clients-deno-enable-testing t
+  "A binary flag that enables or disables the testing server"
+  :type 'boolean
+  :group 'lsp-deno)
+
+(defcustom lsp-clients-deno-testing-args '()
+  "An array of strings which will be provided as arguments when executing tests. This works in the same fashion as the deno test subcommand."
+  :type '(repeat string)
+  :group 'lsp-deno)
+
 (defun lsp-clients-deno--make-init-options ()
   "Initialization options for the Deno language server."
   `( :enable t
@@ -1036,7 +1046,9 @@ Examples: `./import-map.json',
      :codeLens ( :implementations ,(lsp-json-bool lsp-clients-deno-enable-code-lens-implementations)
                  :references ,(lsp-json-bool (or lsp-clients-deno-enable-code-lens-references
                                                  lsp-clients-deno-enable-code-lens-references-all-functions))
-                 :referencesAllFunctions ,(lsp-json-bool lsp-clients-deno-enable-code-lens-references-all-functions))))
+                 :referencesAllFunctions ,(lsp-json-bool lsp-clients-deno-enable-code-lens-references-all-functions))
+     :testing ( :enable ,(lsp-json-bool lsp-clients-deno-enable-testing)
+                :args ,lsp-clients-deno-testing-args)))
 
 (lsp-register-client
  (make-lsp-client :new-connection
