@@ -74,6 +74,20 @@ on top the flycheck face for that error level."
   :group 'lsp-diagnostics
   :package-version '(lsp-mode . "8.0.0"))
 
+(defcustom lsp-diagnostics-clear-stale-on-code-action t
+  "When non-nil, clear stale diagnostics after code actions modify buffer during save.
+This prevents displaying diagnostics with incorrect line numbers (see GitHub issue #3888).
+
+When a code action (like `lsp-organize-imports`) modifies the buffer, existing
+diagnostics may reference stale line numbers. This option causes those stale
+diagnostics to be cleared immediately, preventing confusing error highlighting.
+
+Set to nil to preserve old behavior if issues arise."
+  :type 'boolean
+  :safe 'booleanp
+  :package-version '(lsp-mode . "8.0.0")
+  :group 'lsp-diagnostics)
+
 ;; Flycheck integration
 
 (declare-function flycheck-mode "ext:flycheck")
@@ -206,6 +220,37 @@ from the language server."
                      (add-hook 'lsp-on-idle-hook #'lsp-diagnostics--flycheck-buffer nil t)
                      (lsp--idle-reschedule (current-buffer)))))))))
 
+;;;###autoload
+(defun lsp-diagnostics--handle-code-action-edits (operation)
+  "Clear stale diagnostics after code action edits modify the buffer.
+
+OPERATION is a symbol identifying the edit operation type (e.g.,
+'code-action, 'format, 'refactor). This function only processes
+'code-action operations to avoid clearing diagnostics unnecessarily.
+
+This function is added to `lsp-after-apply-edits-hook' to prevent displaying
+diagnostics with incorrect line numbers after code actions reorganize buffer
+content. For example, when goimports removes imports, existing diagnostics
+reference stale line numbers. This function clears them before the language
+server sends updated diagnostics.
+
+The behavior is controlled by `lsp-diagnostics-clear-stale-on-code-action'.
+
+See GitHub issue #3888: https://github.com/emacs-lsp/lsp-mode/issues/3888
+
+Returns: nil"
+  (when (and (eq operation 'code-action)
+             lsp-diagnostics-clear-stale-on-code-action)
+    (pcase lsp-diagnostics-provider
+      (:flycheck
+       (when (bound-and-true-p flycheck-mode)
+         (flycheck-stop)))
+      ((or :flymake :auto t)
+       (when (bound-and-true-p flymake-mode)
+         (lsp-diagnostics--flymake-clear-stale)))
+      (_ nil))))
+
+
 (cl-defgeneric lsp-diagnostics-flycheck-error-explainer (e _server-id)
   "Explain a `flycheck-error' E in a generic way depending on the SERVER-ID."
   (flycheck-error-message e))
@@ -240,7 +285,8 @@ See https://github.com/emacs-lsp/lsp-mode."
   (lsp-flycheck-add-mode major-mode)
   (add-to-list 'flycheck-checkers 'lsp)
   (add-hook 'lsp-diagnostics-updated-hook #'lsp-diagnostics--flycheck-report nil t)
-  (add-hook 'lsp-managed-mode-hook #'lsp-diagnostics--flycheck-report nil t))
+  (add-hook 'lsp-managed-mode-hook #'lsp-diagnostics--flycheck-report nil t)
+  (add-hook 'lsp-after-apply-edits-hook #'lsp-diagnostics--handle-code-action-edits nil t))
 
 (defun lsp-diagnostics-flycheck-disable ()
   "Disable flycheck integration for the current buffer is it was enabled."
@@ -250,6 +296,7 @@ See https://github.com/emacs-lsp/lsp-mode."
       (setq-local flycheck-checker lsp-diagnostics--flycheck-checker))
     (setq lsp-diagnostics--flycheck-checker nil)
     (setq-local lsp-diagnostics--flycheck-enabled nil)
+    (remove-hook 'lsp-after-apply-edits-hook #'lsp-diagnostics--handle-code-action-edits t)
     (when flycheck-mode
       (flycheck-mode 1))))
 
@@ -268,7 +315,16 @@ See https://github.com/emacs-lsp/lsp-mode."
   (setq lsp-diagnostics--flymake-report-fn nil)
   (add-hook 'flymake-diagnostic-functions 'lsp-diagnostics--flymake-backend nil t)
   (add-hook 'lsp-diagnostics-updated-hook 'lsp-diagnostics--flymake-after-diagnostics nil t)
+  (add-hook 'lsp-after-apply-edits-hook #'lsp-diagnostics--handle-code-action-edits nil t)
   (flymake-mode 1))
+
+(defun lsp-diagnostics--flymake-disable ()
+  "Disable flymake integration for the current buffer."
+  (setq lsp-diagnostics--flymake-report-fn nil)
+  (remove-hook 'flymake-diagnostic-functions 'lsp-diagnostics--flymake-backend t)
+  (remove-hook 'lsp-diagnostics-updated-hook 'lsp-diagnostics--flymake-after-diagnostics t)
+  (remove-hook 'lsp-after-apply-edits-hook #'lsp-diagnostics--handle-code-action-edits t)
+  (flymake-mode -1))
 
 (defun lsp-diagnostics--flymake-after-diagnostics ()
   "Handler for `lsp-diagnostics-updated-hook'."
@@ -318,7 +374,20 @@ See https://github.com/emacs-lsp/lsp-mode."
            ;; function. See https://github.com/joaotavora/eglot/issues/159
            :region (cons (point-min) (point-max))))
 
-
+(defun lsp-diagnostics--flymake-clear-stale ()
+  "Clear stale Flymake diagnostics after code actions modify the buffer.
+This prevents displaying diagnostics with incorrect line numbers.
+
+Reports an empty diagnostics list to Flymake (via :json-false), which clears
+all current diagnostics. New diagnostics from the language server will arrive
+shortly after, now with correct line numbers.
+
+Returns: nil"
+  (when (and flymake-mode
+             lsp-diagnostics--flymake-report-fn)
+    ;; Report empty diagnostics list to clear all current errors
+    (funcall lsp-diagnostics--flymake-report-fn :json-false)))
+
 
 ;;;###autoload
 (defun lsp-diagnostics--enable ()
@@ -359,8 +428,10 @@ See https://github.com/emacs-lsp/lsp-mode."
       (lsp--warn "Unable to autoconfigure flycheck/flymake. The diagnostics won't be rendered.")))
 
     (add-hook 'lsp-unconfigure-hook #'lsp-diagnostics--disable nil t))
-   (t (lsp-diagnostics-flycheck-disable)
-      (remove-hook 'lsp-unconfigure-hook #'lsp-diagnostics--disable t))))
+   (t
+    (lsp-diagnostics-flycheck-disable)
+    (lsp-diagnostics--flymake-disable)
+    (remove-hook 'lsp-unconfigure-hook #'lsp-diagnostics--disable t))))
 
 ;;;###autoload
 (add-hook 'lsp-configure-hook (lambda ()
